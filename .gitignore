@@ -1,0 +1,11 @@
+node_modules/
+*.log
+*.bak-*
+.DS_Store
+memories.jsonl
+qq-bridge-state.json
+qq-bridge-images/
+qq-bridge-stickers/
+.credentials.yaml
+venv/
+__pycache__/

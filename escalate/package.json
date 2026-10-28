@@ -1,0 +1,8 @@
+{
+  "name": "dsh-qq-escalate",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "description": "给群里的机器人分身一个向上求助的工具（ask_owner），判断权在主 agent。",
+  "license": "MIT"
+}

@@ -1,0 +1,157 @@
+# 群机器人 preset（fork 自 DSH 自带的 `standard` preset）。
+#
+# 与 standard 的差别：persona 换成「鲸鱼娘·大肥鱼」的群版，工具收窄到
+# 只看资料 / 看图 / 记人，外加 ask_owner 求助和群友记忆两个自研插件。
+# QQ 桥接那 8 个工具由 dsh-qq-bridge 插件在 profile 层注册，不在这里。
+#
+# The `standard` agent preset: the full coding agent, mounted once per process.
+#
+# This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
+# standing scope; every session naming it joins by scope parentage, so the
+# tools and prompt sections registered here cover each joined agent while a
+# session's own state stays keyed per Session/Agent inside the plugins. The
+# host composition (`base.cordis.yml` + `web.cordis.yml`) keeps everything a
+# preset must not own: the registries themselves, the sandbox and approval
+# stack, persistence, and the model route.
+#
+# A service row here MUST sit inside a group carrying an `isolate` realm.
+# Without one it publishes into the root realm, where it is process-global —
+# another preset publishing the same name collides, and a host reader would
+# resolve one preset's instance for every session; `dsh-agent-presets` rejects
+# that at mount. `true` means an entry-local realm: this standing mount's own
+# private instance, apart from every other preset's. (A shared label does NOT
+# pool instances — `provide()` throws on the second registration under the
+# same realm symbol; labels join REALMS, and are not what this file needs.)
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+# The preset's own persona, shadowing the deployment default for this agent.
+# `{{model}}` and `{{cwd}}` resolve from the agent's own route and workspace.
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    prefix: !!js |
+      (() => {
+        try {
+          const fs = globalThis.process?.getBuiltinModule ? globalThis.process.getBuiltinModule('node:fs') : null;
+          if (!fs) return 'ERR: no fs builtin';
+          // 路径不写死：优先 DSH_HOME，否则 ~/.dsh。改 preset 目录名时同步改这里。
+          const os = globalThis.process?.getBuiltinModule ? globalThis.process.getBuiltinModule('node:os') : null;
+          const home = globalThis.process?.env?.DSH_HOME || (os ? os.homedir() + '/.dsh' : '.dsh');
+          const dir = home + '/.agent-presets/dafeiyu';
+          const parts = [];
+          for (const f of ['soul.md', 'user.md', 'memory.md']) {
+            try { parts.push(fs.readFileSync(dir + '/' + f, 'utf8')); }
+            catch (e) { parts.push('## ' + f + ' (missing: ' + e.message + ')'); }
+          }
+          // 群友记忆：按人聚合，取最近活跃的 25 个人
+          try {
+            const raw = fs.readFileSync(dir + '/memories.jsonl', 'utf8');
+            const rows = raw.split('\n').map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+            if (rows.length) {
+              const byWho = new Map();
+              for (const r of rows) {
+                const k = String(r.who || 'unknown');
+                if (!byWho.has(k)) byWho.set(k, []);
+                byWho.get(k).push(r);
+              }
+              const entries = [...byWho.entries()]
+                .sort((a, b) => Math.max(...b[1].map((x) => x.at || 0)) - Math.max(...a[1].map((x) => x.at || 0)))
+                .slice(0, 25);
+              const blocks = entries.map(([who, rs]) => {
+                const name = [...rs].reverse().map((r) => r.name).filter(Boolean)[0] || who;
+                const items = rs.slice(-8).map((r) => '- ' + r.text).join('\n');
+                return '### ' + name + '（' + who + '）\n' + items;
+              });
+              parts.push('## 你对群友的印象\n\n下面这些是你平时在群里蹲着攒下来的熟人印象。人的近况会变，你记的也未必全准，聊起来的时候在心里自然过一遍就好，千万别像背档案一样一条条念出来。\n\n' + blocks.join('\n\n'));
+            }
+          } catch (e) { /* 还没有记忆文件 */ }
+          parts.push('## 记人的习惯\n\n在群里遇到生面孔，等来回聊熟几句、摸清他是谁、平时干嘛、大概什么脾气之后，就悄悄用 memory_remember 记上一笔。一次合并成一条记下来就行，别把同一件事拆得七零八落。记完了放在肚子里自己知道就好，千万别特意跟人邀功说「我记住你啦」。\n要是有人冷不丁问你认不认识谁，先用 memory_recall 在脑子里翻一翻再接话。');
+          return parts.join('\n\n---\n\n');
+        } catch (e) { return 'ERR: ' + e.message; }
+      })()
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+# `shell-env` stays in the HOST composition: `apps/cli/src/web.ts` injects it to
+# publish `DSH_WEB_URL`/`DSH_WEB_MODE`, and a host row that injects a service is
+# the criterion for host-plane ownership — injection resolves before any session
+# exists, so there is no agent to key by. Behind a preset realm those variables
+# never reached the model's shell at all. Both shell tools consume the host
+# registry from here; their executors (`bash-sandbox`/`pwsh-sandbox`) are
+# host-plane too.
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── delegation and workflows ────────────────────────────────────────────────
+
+# The `subagents` registry and its spawn/fork backends live in the HOST
+# composition: the registry is a process singleton whose cross-session queries
+# the api-proxy serves to the browser, and a provider name may only be
+# registered once. This preset contributes the delegation TOOLS, which resolve
+# that host registry.
+#
+# `workflows` is different — nothing outside an agent reads it — so every row
+# that reaches it shares one entry-local realm here, and a consumer left
+# outside would resolve a host registry this preset does not populate.
+#
+# `tool-subagent-report` is host-plane for the same reason as the registry,
+# not because a preset may not want it: it registers a CONTINUABLE SETUP on
+# that singleton rather than a tool this agent calls, and the setup list is
+# not scope-aware — one copy per mounted preset means every child gets
+# `report` registered once per live session, which throws on the second.
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+# The `web` service and its search provider stay in the host composition; only
+# the model-facing tool is per-session.
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: true
+    searchTimeoutMs: 60000
+
+# ── 求助通道：ask_owner → 主 agent（OpenAI 兼容端点，例如 Hermes api_server）
+# 不用就整段删掉，插件也不会注册 ask_owner。
+- id: qq-escalate
+  name: dsh-qq-escalate
+  config:
+    endpoint: http://127.0.0.1:8642/v1/chat/completions
+    apiKeyEnv: HERMES_API_KEY
+    model: hermes-agent
+    timeoutMs: 120000
+    maxPerHour: 12
+
+# ── 群友记忆：memory_remember / memory_recall ────────────────────────────
+# path 不写就用插件默认值（$DSH_HOME/.agent-presets/dafeiyu/memories.jsonl）。
+- id: qq-memory
+  name: dsh-qq-memory
+  config:
+    maxRecall: 20

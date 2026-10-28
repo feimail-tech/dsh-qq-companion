@@ -1,0 +1,27 @@
+{
+  "name": "dsh-qq-bridge",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "index.js",
+  "description": "Bridge one fixed DSH session to QQ (OneBot / NapCat) and keep its context. Enhanced fork with per-group sessions, human-like splitting, typos, animation/video understanding and on-demand speech-to-text.",
+  "license": "MIT",
+  "author": "sj244 (original) + contributors",
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "onebot",
+    "napcat",
+    "qq",
+    "bridge"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/feimail-tech/dsh-qq-companion.git"
+  },
+  "forkOf": {
+    "name": "dsh-qq-bridge",
+    "version": "0.1.3",
+    "author": "sj244",
+    "url": "https://github.com/sj244/dsh-qq-bridge"
+  }
+}

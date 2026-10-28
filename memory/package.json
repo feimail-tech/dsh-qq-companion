@@ -1,0 +1,8 @@
+{
+  "name": "dsh-qq-memory",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "description": "群友记忆：按人聚合的 trait/episode/relation/alias/fact 原子条目，写入近似去重。",
+  "license": "MIT"
+}
