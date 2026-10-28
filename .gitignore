@@ -4,6 +4,10 @@ node_modules/
 .DS_Store
 memories.jsonl
 qq-bridge-state.json
+qq-bridge-settings.json
+qq-bridge-groups.json
+qq-bridge-atonly.json
+qq-bridge-stickers.json
 qq-bridge-images/
 qq-bridge-stickers/
 .credentials.yaml

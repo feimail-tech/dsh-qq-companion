@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import Schema from '@deepseek-ai/schemastery'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -146,7 +147,8 @@ export const Config = Schema.object({
   followWindowSeconds: Schema.number().default(90).description('她刚在某个群/私聊发完言后，多少秒内那一头的普通消息唤醒概率被抬高（0 = 关掉）。'),
   followBoostProbability: Schema.number().default(0.85).description('抬高后的概率峰值（前 1/4 窗口保持，之后线性衰减回 wakeProbability）。'),
   // ── 被动记忆强心剂（2026-10-24）──────────────────────────────────────────
-  memoryMineModel: Schema.string().default('workbuddy/glm-5.3-flash').description('每轮提炼记忆用的便宜模型（provider/model）；留空 = 关闭被动记忆。'),
+  memoryPath: Schema.string().default('').description('memories.jsonl 的路径；留空 = <DSH_HOME>/.agent-presets/dafeiyu/memories.jsonl（与 memory 插件的默认位置一致）。'),
+  memoryMineModel: Schema.string().default('').description('每轮提炼记忆用的便宜模型（provider/model）；留空 = 关闭被动记忆。'),
   memoryMineDailyCap: Schema.number().default(40).description('每天最多自动写多少条记忆（0 = 关闭）；宁少勿滥，塞满反而把她上下文挤糊。'),
   // ── M5：NapCat 自助托管 ───────────────────────────────────────────────────
   // 注意：这些只是**参数**；插件加载时绝不下载或执行任何东西，
@@ -203,7 +205,8 @@ const BridgeSettings = Schema.object({
   // 发言后跟进窗口：她说完话那一分钟最容易接话，之后自然沉回去（抄 AstrBot active_reply 的思路）
   followWindowSeconds: Schema.number().default(90).description('她发完言后多少秒内，同一目的地的普通消息唤醒概率被抬高（0 = 关闭；90 秒≈一分半后自然沉回）。'),
   followBoostProbability: Schema.number().default(0.85).description('抬高后的概率峰值（前 1/4 窗口保持，之后衰减）；嫌吵就调低到 0.5。'),
-  memoryMineModel: Schema.string().default('workbuddy/glm-5.3-flash').description('每轮说完话后提炼记忆用的便宜模型（provider/model）；留空 = 不做被动记忆。'),
+  memoryPath: Schema.string().default('').description('memories.jsonl 的路径；留空 = <DSH_HOME>/.agent-presets/dafeiyu/memories.jsonl。'),
+  memoryMineModel: Schema.string().default('').description('每轮说完话后提炼记忆用的便宜模型（provider/model）；留空 = 不做被动记忆。'),
   memoryMineDailyCap: Schema.number().default(40).description('每天最多自动写多少条记忆（0 = 关闭）——记忆不是越多越好，塞满会把她上下文挤糊。'),
 })
 
@@ -451,7 +454,8 @@ export function apply(ctx, config) {
       pokeBackCooldownSeconds: Math.max(0, Number(s.pokeBackCooldownSeconds ?? config.pokeBackCooldownSeconds ?? 30)),
       followWindowSeconds: Math.max(0, Number(s.followWindowSeconds ?? config.followWindowSeconds ?? 90)),
       followBoostProbability: clamp01(Number(s.followBoostProbability ?? config.followBoostProbability ?? 0.85)),
-      memoryMineModel: String(s.memoryMineModel ?? config.memoryMineModel ?? 'workbuddy/glm-5.3-flash').trim(),
+      memoryPath: String(s.memoryPath ?? config.memoryPath ?? '').trim(),
+      memoryMineModel: String(s.memoryMineModel ?? config.memoryMineModel ?? '').trim(),
       memoryMineDailyCap: Math.max(0, Number(s.memoryMineDailyCap ?? config.memoryMineDailyCap ?? 40)),
       agentPreset: String(s.agentPreset ?? config.agentPreset ?? '').trim(),
       heartbeatTimeoutMs: Math.max(10000, Number(config.heartbeatTimeoutMs ?? 90000)),
@@ -705,7 +709,7 @@ export function apply(ctx, config) {
   /**
    * 唤醒限流（2026-10-23 加）。
    *
-   * 事故：情报姬②群里一个人连续十几次问「你能不能联网」，每次 @ 都是「必醒」，
+   * 事故：某大群里一个人连续十几次问「你能不能联网」，每次 @ 都是「必醒」，
    * 于是一个号几分钟内跑了几十轮 40k token 的请求 → 撞上游频率上限
    * （429 / code 14003）→ 半小时后三个反代账号全部 11140 封号。
    *
@@ -1265,14 +1269,16 @@ export function apply(ctx, config) {
    * 只贴**发言人本人**的档案：群号维度的 fact（「这个群有专门一条会话」）不贴，
    * 那是运维信息，贴了她会在群里说些会话、配置之类的话。
    */
-  const MEMORY_FILE = join(homedir(), '.dsh', '.agent-presets', 'zexiaomiao', 'memories.jsonl')
+  // memories.jsonl 的路径：memoryPath 留空时回退到「当前 DSH_HOME 下的 dafeiyu preset」，
+  // 跟 memory 插件的默认落盘位置一致（两边读写同一个文件；换 preset 名或设了 DSH_HOME 都不会脱节）。
+  const memoryFilePath = () => readSettings().memoryPath || join(home, '.agent-presets', 'dafeiyu', 'memories.jsonl')
   let memCache = { at: 0, rows: [] }
 
   function loadMemories() {
     const now = Date.now()
     if (now - memCache.at < 30000) return memCache.rows
     try {
-      const raw = readFileSync(MEMORY_FILE, 'utf8')
+      const raw = readFileSync(memoryFilePath(), 'utf8')
       const rows = []
       for (const line of raw.split('\n')) {
         const s = line.trim()
@@ -1295,7 +1301,7 @@ export function apply(ctx, config) {
     if (!uid) return ''
     const nick = String(msg.nickname ?? '').trim()
     // ⚠️ 记忆里的 `who` 不一定是 QQ 号：她自己记群友时常把昵称写进 who
-    // （实测「W罐（我，咏唱了毁灭的诗）」就是这么存的）。只按号匹配会整片漏掉，
+    // （实测有群友把「昵称（括注）」整串写进了 who，就是这么存的）。只按号匹配会整片漏掉，
     // 所以号、昵称两头都认 —— 昵称改了会漏，所以长期还是得让她记号。
     const mine = rows.filter((r) => {
       const w = String(r.who ?? '')
@@ -1557,7 +1563,10 @@ export function apply(ctx, config) {
   // 只给模型第一帧是旧坑：动作类梗图的关键元素常不在首帧（见 skill 坑 17）。
   // 注意：`home` 是 ~/.dsh（不是 ~），拼脚本路径别再套一层 .dsh。
   // 用 import.meta.url 定位同目录脚本，跟 home 怎么变都无关。
-  const MONTAGE_SCRIPT = new URL('montage.py', import.meta.url).pathname
+  // ⚠️ 必须走 fileURLToPath：Windows 下 `.pathname` 会得到 `/E:/.../montage.py`，开头多一个斜杠，Python 找不到文件。
+  const MONTAGE_SCRIPT = fileURLToPath(new URL('montage.py', import.meta.url))
+  // Windows 一般没有 python3.exe（只有 python.exe / py），用 MONTAGE_PYTHON 可以指定别的解释器。
+  const MONTAGE_PYTHON = process.env.MONTAGE_PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
   // dsh-web 的 systemd PATH 里没有 ffmpeg，必须给绝对路径（node 版 ffmpeg 走 spawn，不经 shell）。
   // ffmpeg / ffprobe 默认从 PATH 找；装在别处就设这两个环境变量。
   const MONTAGE_FFMPEG = process.env.MONTAGE_FFMPEG || 'ffmpeg'
@@ -1682,7 +1691,7 @@ export function apply(ctx, config) {
         resolve(value)
       }
       try {
-        const child = spawn('python3', [MONTAGE_SCRIPT, JSON.stringify({ kind, src: srcPath, out: outPath, maxSeconds })], {
+        const child = spawn(MONTAGE_PYTHON, [MONTAGE_SCRIPT, JSON.stringify({ kind, src: srcPath, out: outPath, maxSeconds })], {
           stdio: ['ignore', 'pipe', 'pipe'],
           env: { ...process.env, MONTAGE_FFMPEG, MONTAGE_FFPROBE },
         })
@@ -1958,13 +1967,13 @@ export function apply(ctx, config) {
     // 目的地无论是否唤醒都要记：这样“只记录”期间的闲聊之后也能被回复到。
     if (d.action === 'wake') {
       rememberDestination(msg)   // 原为 !== 'drop'：多群下会被别的群 sampled-out 的闲聊盖掉目的地
-      // 留给 turn/end 做被动记忆：这一轮谁在说话、说了什么
-      pendingMemoryTurn = {
+      // 留给 turn/end 做被动记忆：这一轮谁在说话、说了什么。按会话 id 存，两群并发时不会互相覆盖。
+      pendingMemoryTurns.set(String(sessionIdFor(msg, s) || ''), {
         userId: msg.userId ?? null,
         nickname: msg.nickname ?? null,
         groupId: msg.groupId ?? null,
         text: String(msg.text ?? '').slice(0, 400),
-      }
+      })
     }
 
     if (d.action === 'drop') return { ...d, delivered: false }
@@ -2641,20 +2650,21 @@ export function apply(ctx, config) {
 
   // ── 出站：目标会话的回复 → QQ ────────────────────────────────────────────────
 
-  let pendingReply = null
+  // 按会话隔离：两个群前后脚跑的时候各攒各的，先 turn/end 的那一轮不会把别的群的回复一起发出去。
+  const pendingReplies = new Map()   // sid -> 这一轮累积的回复文本
 
   // ── 被动记忆（2026-10-24）：这一轮是谁说的话、说了什么，留给 turn/end 提炼 episode ──
   // 为什么不用她自己写：memory_remember 实测两天只落 7 条，工具在手上、习惯没养成，
   // 靠提示词治不好（skill 坑 19 的教训）。所以主力放在「读完她这一轮，程序替她记」。
-  let pendingMemoryTurn = null
-  const MEMORY_PATH = join(homedir(), '.dsh', '.agent-presets', 'zexiaomiao', 'memories.jsonl')
+  const pendingMemoryTurns = new Map()   // sid -> 这一轮的发言快照（turn/end 消费）
+  // 记忆文件路径统一走 memoryFilePath()（见上，支持 memoryPath 配置与 DSH_HOME）
   let memoryDay = { key: '', count: 0 }
 
   /** 读 memories.jsonl 最后 n 条（坏行跳过）。去重与运维排查都用它。 */
   function readMemoryTail(n) {
     try {
-      if (!existsSync(MEMORY_PATH)) return []
-      const lines = readFileSync(MEMORY_PATH, 'utf8').split('\n').filter(Boolean)
+      if (!existsSync(memoryFilePath())) return []
+      const lines = readFileSync(memoryFilePath(), 'utf8').split('\n').filter(Boolean)
       return lines.slice(-n).map((l) => {
         try { return JSON.parse(l) } catch { return null }
       }).filter(Boolean)
@@ -2715,8 +2725,8 @@ export function apply(ctx, config) {
       const head = text.slice(0, 12)
       const prev = readMemoryTail(200)
       if (prev.some((m) => String(m.who) === String(turn?.userId ?? who) && String(m.text ?? '').startsWith(head))) return
-      mkdirSync(dirname(MEMORY_PATH), { recursive: true })
-      appendFileSync(MEMORY_PATH, `${JSON.stringify({
+      mkdirSync(dirname(memoryFilePath()), { recursive: true })
+      appendFileSync(memoryFilePath(), `${JSON.stringify({
         who: String(turn?.userId ?? who),
         name: who,
         type: 'episode',
@@ -2779,7 +2789,7 @@ export function apply(ctx, config) {
    * 工具轮次的出站目的地：**优先按「这条工具调用属于哪个会话」取**。
    * 工具 execute 的第二个参数 exec 带 caller agent，`exec.agent.sessionId` 就是当前会话 id。
    * 只靠全局 `lastDestination` 时，两群前后脚说话，后到的群会把目的地盖掉，
-   * 结果就是「A 群问的话，回复发到 B 群」（2026-10-26 实测：小窝的回话发进了 ElecKoi 群）。
+   * 结果就是「A 群问的话，回复发到 B 群」（实测：测试群的回话发进了另一个大群）。
    * 取不到会话级目的地才回落到 lastDestination。
    */
   function destForToolExec(exec) {
@@ -2932,7 +2942,8 @@ export function apply(ctx, config) {
       // 继续累加会重复，所以直接重算为当前这条。
       const text = messageText(data.message)
       if (!text) return
-      pendingReply = event.surfaceOp && event.surfaceOp !== 'append' ? text : pendingReply ? `${pendingReply}\n${text}` : text
+      const prevText = pendingReplies.get(sid) || ''
+      pendingReplies.set(sid, event.surfaceOp && event.surfaceOp !== 'append' ? text : prevText ? `${prevText}\n${text}` : text)
       return
     }
 
@@ -2940,22 +2951,25 @@ export function apply(ctx, config) {
       const kind = typeof data.reason?.kind === 'string' ? data.reason.kind : 'unknown'
       // 这一轮结束了，解掉「正在跑」的锁，下一条消息才能唤醒（见 busyTurns 注释）。
       busyTurns.delete(sid)
-      const raw = pendingReply
-      pendingReply = null
+      const raw = pendingReplies.get(sid) ?? null
+      pendingReplies.delete(sid)
       // 消费：这一轮结束，当前轮判定清空，等下一次 turn/start 重新快照。
       const fromQQ = currentTurnFromQQ
       currentTurnFromQQ = false
       turnActive = false
       claimedFromQQ = false
       nonQQConfirmPending = false
+      // 落盘：不写回去的话，下一轮 turn/start 的 loadGate 会把 nonQQConfirm 恢复成上一轮的值，
+      // 二次确认就白等了一次（多会话下尤其明显）。
+      saveGate(sid)
       if (!raw) return
 
       // 被动记忆：这一轮她真的开口了、而且是 QQ 那头起的，就趁上下文还热提炼一条 episode。
       // 异步跑、不阻塞出站（她该发的照发），失败只少记一条。
-      if (fromQQ && pendingMemoryTurn) {
-        const turnSnap = pendingMemoryTurn
-        pendingMemoryTurn = null
-        void mineEpisode(turnSnap, raw)
+      const memTurn = pendingMemoryTurns.get(sid) ?? null
+      pendingMemoryTurns.delete(sid)
+      if (fromQQ && memTurn) {
+        void mineEpisode(memTurn, raw)
       }
 
       // 闸门的第一道：**只发 QQ 唤醒的那一轮**。DSH 界面里聊出来的标记块一个字都不发。
@@ -3323,10 +3337,28 @@ export function apply(ctx, config) {
   //   ② 不是 QQ 唤醒的那一轮 → 第一次调用只回一句“确认要发吗”（**一个字都不发**），
   //      同一轮里再调一次才真的发。`nonQQConfirmPending` 按轮清零，不跨轮泄漏。
   // 返回**字符串**时调用方必须原样 return 它；返回 null = 放行。
-  function outboundGate(action) {
-    if (currentTurnFromQQ) return null
+  /** 从工具 execute 的第二个参数取当前会话 id；`session-` 前缀两种都试（跟 destForToolExec 同规矩）。 */
+  function sidForToolExec(exec) {
+    const raw = exec?.agent?.sessionId ?? exec?.agent?.id
+    if (!raw) return ''
+    const sid = String(raw)
+    if (gateStates.has(sid)) return sid
+    const alt = sid.startsWith('session-') ? sid.slice(8) : `session-${sid}`
+    return gateStates.has(alt) ? alt : sid
+  }
+
+  function outboundGate(action, exec) {
+    // 按会话取闸门状态：多会话并行时全局标志可能停在别的群上；
+    // 二次确认的 pending 不落盘的话，同会话下一轮调用工具时会被 loadGate 冲回 false。
+    const sid = sidForToolExec(exec)
+    if (sid) loadGate(sid)
+    if (currentTurnFromQQ) {
+      if (sid) saveGate(sid)
+      return null
+    }
     if (!nonQQConfirmPending) {
       nonQQConfirmPending = true
+      if (sid) saveGate(sid)
       return JSON.stringify({
         sent: 0,
         needsConfirm: true,
@@ -3336,6 +3368,7 @@ export function apply(ctx, config) {
       }, null, 2)
     }
     logger.info(`非 QQ 轮：二次确认通过，按确认执行（${action}）`)
+    if (sid) saveGate(sid)
     return null
   }
 
@@ -3359,7 +3392,7 @@ export function apply(ctx, config) {
       // 不是 QQ 唤醒的那一轮，第一次调用只回一句“确认要发吗”、**一个字都不发**；
       // 同一轮里再调一次才真的发出去。DSH 侧依然不会误发（多跨一道有意识的动作），
       // 但同时保住了“我确实想让你发到 QQ”这条能力 —— 以前是彻底发不出去。
-      const blocked = outboundGate('qq_bridge_send')
+      const blocked = outboundGate('qq_bridge_send', exec)
       if (blocked !== null) return blocked
       // 目的地优先级：显式参数 → 本会话的入站目的地 → 全局最后一次入站。
       // 少了中间那层，两群并行时回复会串到隔壁群（见 destForToolExec 注释）。
@@ -3566,7 +3599,7 @@ export function apply(ctx, config) {
 
         if (action === 'send') {
           // 与 qq_bridge_send 同一道闸门：非 QQ 轮第一次调用只回确认、一个字都不发。
-          const blocked = outboundGate('qq_bridge_sticker')
+          const blocked = outboundGate('qq_bridge_sticker', exec)
           if (blocked !== null) return blocked
 
           let entry = null
@@ -4062,7 +4095,7 @@ export function apply(ctx, config) {
   // ── 按需转写：她说想"听"的时候才跑，默认不进上下文 ──────────────────────────
   // 参考实现：AstrBot 是收到语音就自动转（pipeline preprocess_stage），MaiBot 也是自动
   // （voice.enable_asr 开关）。两家都没做按需，我们这条是故意的：群里语音少，
-  // 自动转每条都要白等 1 秒、白占几十 token。常驻 ASR 服务见 zexiaomiao-asr.service。
+  // 自动转每条都要白等 1 秒、白占几十 token。常驻 ASR 服务见 asr/asr_service.py（README 有启动方式）。
   ctx.tools.register(defineTool({
     name: 'qq_bridge_transcribe',
     description:

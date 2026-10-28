@@ -36,7 +36,7 @@
 - 一个 OneBot v11 实现（NapCat / SnowLuma / LLOneBot 都行），暴露 HTTP + WS
 - Node.js 20+
 - 可选：`ffmpeg` / `ffprobe` 在 PATH 里（动图、视频理解要用；不装就退回首帧）
-- 可选：Python 3.10+ 加 `faster-whisper`、`silk-python`（语音转写要用）
+- 可选：Python 3.10+ 加 `faster-whisper`、`silk-python`（语音转写要用）、`Pillow`（动图/视频拼九宫格要用）
 
 ## 安装
 
@@ -44,24 +44,32 @@
 
 ```sh
 PROFILE=~/.dsh/profiles/web/node_modules
-cp -r bridge memory escalate "$PROFILE"/
+# ⚠️ 目录名要跟各插件 package.json 里的 name 对上：Cordis 是按**包名**加载的，
+# 拷成 bridge/ memory/ escalate/ 会报找不到 dsh-qq-bridge / dsh-qq-memory / dsh-qq-escalate。
+cp -r bridge   "$PROFILE/dsh-qq-bridge"
+cp -r memory   "$PROFILE/dsh-qq-memory"
+cp -r escalate "$PROFILE/dsh-qq-escalate"
 ```
 
 2. 在 `~/.dsh/profiles/web/cordis.patch.yml` 里启用 bridge（最小示例）：
 
 ```yaml
 - id: qq-bridge
+  name: dsh-qq-bridge        # 新增条目要写包名（profile 里已预置同 id 时可省）
   config:
     onebotUrl: ws://127.0.0.1:3001
     accessTokenEnv: ONEBOT_ACCESS_TOKEN
     targetSessionId: 'session-<先在界面里建一条会话，把 id 抄过来>'
     groupWhitelist: ['<你的群号>']
     whitelist: ['<允许私聊的 QQ 号>']
+    nicknames: ['大肥鱼', '鲸鱼娘']   # 群里点名这些名字时必唤醒；默认 ['244']
     wakeProbability: 0.08
     atOnlyInGroup: false
     recentChatLimit: 60
     replyMode: marker        # marker = 用 [QQ]…[/QQ] 块回；tool = 用 qq_bridge_send
     visionModel: '<provider>/<能看图的模型>'
+    # memoryPath: ''                        # 留空 = <DSH_HOME>/.agent-presets/dafeiyu/memories.jsonl
+    # memoryMineModel: '<provider>/<便宜模型>'  # 留空 = 关闭每轮被动记忆提炼（开源默认关）
 ```
 
 字段含义见 `docs/upstream-README.md`，本仓库新增的字段在 `bridge/index.js` 的 `Config` 里都有说明。
@@ -89,6 +97,9 @@ python -m venv ~/asr-venv && ~/asr-venv/bin/pip install faster-whisper silk-pyth
 ```
 
 `bridge` 里默认连 `http://127.0.0.1:8799`，可以用环境变量 `ASR_URL` 改。
+
+模型默认用 faster-whisper 的 `small`（首次启动从 HuggingFace 下载，几百 MB）；想用本地已下好的目录就设
+`ASR_MODEL=/path/to/model`。机器慢就动 `ASR_DEVICE` / `ASR_COMPUTE`（默认 `cpu` / `int8`）。
 
 ## 几个必须知道的坑
 

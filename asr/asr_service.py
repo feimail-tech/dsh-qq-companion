@@ -20,12 +20,15 @@ import io
 import json
 import os
 import sys
+import tempfile
 import time
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-MODEL_DIR = os.environ.get('ASR_MODEL', '/mnt/e/hermes-tools/asr/models/fw-small')
+# 默认用 faster-whisper 的模型名 small（首次运行自动从 HF 下载）；
+# 想用本地已下好的目录（省流量、离线）就用 ASR_MODEL=/path/to/model 覆盖。
+MODEL_DIR = os.environ.get('ASR_MODEL', 'small')
 DEVICE = os.environ.get('ASR_DEVICE', 'cpu')
 COMPUTE_TYPE = os.environ.get('ASR_COMPUTE', 'int8')
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8799
@@ -67,7 +70,7 @@ def silk_to_wav_bytes(silk: bytes) -> bytes:
 
 def transcribe(audio: bytes, fmt: str, lang: str) -> dict:
     wav = silk_to_wav_bytes(audio) if fmt == 'silk' else audio
-    tmp = os.path.join('/tmp', f'asr-{os.getpid()}-{int(time.time() * 1000)}.wav')
+    tmp = os.path.join(tempfile.gettempdir(), f'asr-{os.getpid()}-{int(time.time() * 1000)}.wav')
     with open(tmp, 'wb') as handle:
         handle.write(wav)
     try:
@@ -92,7 +95,7 @@ def transcribe(audio: bytes, fmt: str, lang: str) -> dict:
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
-    server_version = 'zexiaomiao-asr/1.0'
+    server_version = 'dsh-qq-asr/1.0'
 
     def log_message(self, fmt, *args):  # noqa: A003  别把每条请求刷进 journal
         return

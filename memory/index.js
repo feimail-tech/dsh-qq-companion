@@ -45,7 +45,11 @@ function saveAll(file, rows) {
   writeFileSync(file, rows.map(r => JSON.stringify(r)).join('\n') + '\n', 'utf8')
 }
 
-/** 粗糙相似度：取两串的字二元组 Jaccard，够用来挡重复记同一件事。 */
+/**
+ * 粗糙相似度：取两串的字二元组 Jaccard（交集 / 并集），够用来挡重复记同一件事。
+ * 分母用**并集**而不是较短那一串：短句被长句包住时不会算出 1.0，
+ * 否则「先记了短句、后来补上细节的长句」会被当成完全重复直接跳过，新信息就丢了。
+ */
 function similar(a, b) {
   const grams = s => {
     const g = new Set()
@@ -57,7 +61,7 @@ function similar(a, b) {
   if (!A.size || !B.size) return 0
   let hit = 0
   for (const x of A) if (B.has(x)) hit++
-  return hit / Math.min(A.size, B.size)
+  return hit / (A.size + B.size - hit)
 }
 
 export function apply(ctx, config) {
