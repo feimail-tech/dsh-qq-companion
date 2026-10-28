@@ -45,23 +45,38 @@ function saveAll(file, rows) {
   writeFileSync(file, rows.map(r => JSON.stringify(r)).join('\n') + '\n', 'utf8')
 }
 
+/** 字二元组集合（去掉空白）。similar 与 containment 共用。 */
+function bigrams(s) {
+  const g = new Set()
+  const t = String(s).replace(/\s+/g, '')
+  for (let i = 0; i < t.length - 1; i++) g.add(t.slice(i, i + 2))
+  return g
+}
+
 /**
- * 粗糙相似度：取两串的字二元组 Jaccard（交集 / 并集），够用来挡重复记同一件事。
+ * 整体相似度：字二元组 Jaccard（交集 / 并集）。
  * 分母用**并集**而不是较短那一串：短句被长句包住时不会算出 1.0，
  * 否则「先记了短句、后来补上细节的长句」会被当成完全重复直接跳过，新信息就丢了。
  */
 function similar(a, b) {
-  const grams = s => {
-    const g = new Set()
-    const t = String(s).replace(/\s+/g, '')
-    for (let i = 0; i < t.length - 1; i++) g.add(t.slice(i, i + 2))
-    return g
-  }
-  const A = grams(a), B = grams(b)
+  const A = bigrams(a), B = bigrams(b)
   if (!A.size || !B.size) return 0
   let hit = 0
   for (const x of A) if (B.has(x)) hit++
   return hit / (A.size + B.size - hit)
+}
+
+/**
+ * 重合率：交集 / 较短那一串。判断「一条是否基本被另一条整条包住」。
+ * Jaccard 在长短悬殊时会掉到很低（5 字 vs 16 字 ≈ 0.27），光靠它认不出「短句是长句的一部分」，
+ * 所以撞车判定是两道一起看：够像（Jaccard > 0.75）**或者**整条被包住（containment > 0.95）。
+ */
+function containment(a, b) {
+  const A = bigrams(a), B = bigrams(b)
+  if (!A.size || !B.size) return 0
+  let hit = 0
+  for (const x of A) if (B.has(x)) hit++
+  return hit / Math.min(A.size, B.size)
 }
 
 export function apply(ctx, config) {
@@ -101,11 +116,18 @@ export function apply(ctx, config) {
       const now = Date.now()
 
       const same = rows.filter(r => r.who === who && r.type === type)
-      const dup = same.find(r => similar(r.text, text) > 0.75)
+      // 撞车判定：整体够像（Jaccard > 0.75），或者一条被另一条整条包住（短句 ↔ 补了细节的长句）。
+      const dup = same.find(r => similar(r.text, text) > 0.75 || containment(r.text, text) > 0.95)
       if (dup) {
-        if (similar(dup.text, text) > 0.95) {
-          return { stored: 'skipped', total: same.length }
-        }
+        const oldText = String(dup.text ?? '')
+        const newText = String(text)
+        // 几乎一模一样：不写。
+        if (similar(oldText, newText) > 0.95) return { stored: 'skipped', total: same.length }
+        // 旧的整条被新的包住、且新的更长 → 用新的覆盖，把补上的细节留住。
+        const newerCovers = containment(oldText, newText) > 0.95 && newText.length > oldText.length
+        // 反过来（新的更短或等长、被旧的整条包住）→ 保留原来那条更全的，别拿短的盖长的。
+        const olderCovers = containment(newText, oldText) > 0.95
+        if (!newerCovers && olderCovers) return { stored: 'skipped', total: same.length }
         dup.text = text
         dup.at = now
         if (args.name) dup.name = String(args.name)
