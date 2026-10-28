@@ -40,6 +40,13 @@
 
 ## 安装
 
+0. 先把仓库拉下来（或者直接下 zip 解压）：
+
+```sh
+git clone https://github.com/feimail-tech/dsh-qq-companion.git
+cd dsh-qq-companion
+```
+
 1. 把三个插件拷进 DSH profile 的 node_modules：
 
 ```sh
